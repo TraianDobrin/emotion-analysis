@@ -51,13 +51,16 @@ _LEADING_LABEL = re.compile(
 )
 # A separator line: '###' alone, or a short markdown header like '### Story 2:'.
 _SEP_LINE = re.compile(r"^\s*#{2,}[^\n]{0,40}$", re.MULTILINE)
+# A label alone on its line, like '[story 2]', 'Story 2:', '**Dialogue 3**'.
+_LABEL_LINE = re.compile(r"^\s*\**\[?\s*(?:story|dialogue)\s*\d+\s*\]?[:.]?\**\s*$", re.IGNORECASE | re.MULTILINE)
+_SPLIT = re.compile(_LABEL_LINE.pattern + "|" + _SEP_LINE.pattern, re.IGNORECASE | re.MULTILINE)
 
 
 def parse_items(text: str, min_chars: int = 40) -> list[str]:
-    """Split a generation into items on separator/header lines, falling back to
-    blank lines (small local models often ignore the separator)."""
-    if _SEP_LINE.search(text):
-        parts = _SEP_LINE.split(text)
+    """Split a generation into items on label lines ('[story 2]') and separator/header
+    lines ('###'), or else on blank lines (small local models often ignore the format)."""
+    if _SPLIT.search(text):
+        parts = _SPLIT.split(text)
     else:
         parts = re.split(r"\n\s*\n", text)
     items = []

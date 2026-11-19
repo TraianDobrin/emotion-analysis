@@ -35,14 +35,17 @@ class Job:
 
 
 def build_jobs(kind: str, topics: list[str], emotions: list[str] | None, n_per_call: int,
-               calls_per_topic: int = 1) -> list[Job]:
+               calls_per_topic: int = 1, story_template: str | None = None) -> list[Job]:
+    """story_template: optional prompt with {n_stories}, {topic}, {emotion} fields, e.g.
+    the paper's prompt from scripts/import_paper_assets.py. Default: our own prompt."""
     jobs = []
     for ti, topic in enumerate(topics):
         for rep in range(calls_per_topic):
             if kind == "story":
                 for ei, emo in enumerate(emotions):
-                    jobs.append(Job(f"s-{ei:03d}-{ti:03d}-{rep}", kind, emo, ti, topic,
-                                    story_prompt(topic, emo, n_per_call)))
+                    prompt = (story_template.format(n_stories=n_per_call, topic=topic, emotion=emo)
+                              if story_template else story_prompt(topic, emo, n_per_call))
+                    jobs.append(Job(f"s-{ei:03d}-{ti:03d}-{rep}", kind, emo, ti, topic, prompt))
             else:
                 jobs.append(Job(f"n-{ti:03d}-{rep}", kind, None, ti, topic, neutral_prompt(topic, n_per_call)))
     return jobs
@@ -62,6 +65,9 @@ def _rows(job: Job, text: str, drop_named: bool = True) -> list[dict]:
     items = parse_items(text)
     if job.kind == "story" and drop_named:
         items = [t for t in items if not names_emotion(t, job.emotion)]
+    if job.kind == "neutral":  # as in the paper, use Human/Assistant speaker names
+        items = [re.sub(r"^Person:", "Human:", re.sub(r"^AI:", "Assistant:", t, flags=re.M), flags=re.M)
+                 for t in items]
     return [
         {"id": f"{job.custom_id}-{k}", "kind": job.kind, "emotion": job.emotion,
          "topic_id": job.topic_id, "topic": job.topic, "text": item}
@@ -143,12 +149,15 @@ def run_anthropic_batches(jobs: list[Job], out_path: str, model: str = "claude-o
 
 
 # ---- OpenAI-compatible APIs (DeepSeek, OpenRouter, Groq, Together, Gemini, ...) --------
+# Default reasoning effort per preset (thinking models; stories don't need much thought).
+REASONING_DEFAULTS = {"gemini": "low"}
+
 PRESETS = {
     # name: (base_url, default model, env var holding the key)
     "deepseek": ("https://api.deepseek.com", "deepseek-chat", "DEEPSEEK_API_KEY"),
     "openrouter": ("https://openrouter.ai/api/v1", "deepseek/deepseek-chat", "OPENROUTER_API_KEY"),
     "groq": ("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", "GROQ_API_KEY"),
-    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.5-flash", "GEMINI_API_KEY"),
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-3.5-flash", "GEMINI_API_KEY"),
 }
 
 
@@ -161,8 +170,9 @@ def _done_job_ids(out_path: str) -> set[str]:
 
 
 def run_openai_compatible(jobs: list[Job], out_path: str, model: str, base_url: str,
-                          api_key_env: str, workers: int = 16, max_tokens: int = 3000,
-                          temperature: float = 1.0, max_retries: int = 5, client=None):
+                          api_key_env: str, workers: int = 16, max_tokens: int = 16000,
+                          temperature: float = 1.0, max_retries: int = 6, client=None,
+                          reasoning_effort: str | None = None):
     """Run jobs concurrently against an OpenAI-compatible chat endpoint.
 
     Resumable: jobs whose rows are already in out_path are skipped. Jobs that fail
@@ -180,21 +190,27 @@ def run_openai_compatible(jobs: list[Job], out_path: str, model: str, base_url: 
     todo = [j for j in jobs if j.custom_id not in done]
     print(f"{len(jobs) - len(todo)} jobs already done, {len(todo)} to run")
     lock = threading.Lock()
-    stats = {"items": 0, "failed": 0}
+    stats = {"items": 0, "failed": 0, "truncated": 0}
+    extra = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
 
     def work(job: Job):
         for attempt in range(max_retries):
             try:
                 resp = client.chat.completions.create(
                     model=model, max_tokens=max_tokens, temperature=temperature,
-                    messages=[{"role": "user", "content": job.prompt}],
+                    messages=[{"role": "user", "content": job.prompt}], **extra,
                 )
-                return job, resp.choices[0].message.content or ""
+                choice = resp.choices[0]
+                if getattr(choice, "finish_reason", None) == "length":
+                    # thinking models can spend the budget before writing; keep what parsed
+                    with lock:
+                        stats["truncated"] += 1
+                return job, choice.message.content or ""
             except Exception as e:  # rate limits, timeouts, 5xx: back off and retry
                 if attempt == max_retries - 1:
                     print(f"{job.custom_id} failed: {type(e).__name__}: {e}")
                     return job, None
-                time.sleep(2 ** attempt)
+                time.sleep(min(60, 2 ** (attempt + 1)))  # 2..32s: outlasts per-minute limits
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(work, j) for j in todo]
@@ -207,7 +223,8 @@ def run_openai_compatible(jobs: list[Job], out_path: str, model: str, base_url: 
                 rows = _rows(job, text)
                 _append(out_path, rows)
                 stats["items"] += len(rows)
-    print(f"wrote {stats['items']} items; {stats['failed']} jobs failed (re-run to retry them)")
+    print(f"wrote {stats['items']} items; {stats['failed']} jobs failed (re-run to retry them); "
+          f"{stats['truncated']} responses hit max_tokens")
 
 
 # ---- Local Hugging Face model ----------------------------------------------------------

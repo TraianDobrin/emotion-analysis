@@ -73,6 +73,9 @@ def test_parse_items():
     assert items == ["A" * 50, "B" * 50]
     assert parse_items("x" * 50 + "\n\n" + "y" * 50) == ["x" * 50, "y" * 50]
     assert parse_items("### Story 1:\n" + "x" * 50 + "\n\n### Story 2:\n" + "y" * 50) == ["x" * 50, "y" * 50]
+    # paper format: '[story N]' label lines; paragraphs inside a story stay together
+    t = "[story 1]\n" + "x" * 50 + "\n\n" + "z" * 50 + "\n[story 2]\n" + "y" * 50
+    assert parse_items(t) == ["x" * 50 + "\n\n" + "z" * 50, "y" * 50]
 
 
 def test_names_emotion():
