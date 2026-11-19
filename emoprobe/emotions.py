@@ -42,6 +42,12 @@ CORE_EMOTIONS = [
     "proud", "surprised", "bored", "loving", "nervous", "hopeful", "ashamed", "content",
 ]
 
+# Minimal set for reproducing just the "happy" vector. The method subtracts the mean
+# across emotions, so happiness needs contrasts: negative (sad, afraid, angry),
+# low-arousal positive (calm) and low-arousal neutral-ish (bored), so the happy
+# direction is not just "positive" or just "high energy".
+HAPPY_MIN = ["happy", "sad", "afraid", "angry", "calm", "bored"]
+
 # Our own everyday premises; deliberately emotionally open-ended so any emotion fits.
 TOPICS = [
     "A person receives an unexpected phone call from a relative they haven't spoken to in years",

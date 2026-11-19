@@ -78,6 +78,35 @@ def dose_test(ep):
         print(f"{d:8d} " + " ".join(f"{row[ep.emotions.index(c)]:10.2f}" for c in cols))
 
 
+HAPPY_PAIRS = [  # (good, bad) versions of the same situation
+    ("My sister finally got the job she has wanted for years.", "My sister lost the job she had wanted for years."),
+    ("The biopsy came back benign.", "The biopsy came back malignant."),
+    ("My dog came home after being missing for a week.", "My dog was hit by a car after being missing for a week."),
+    ("I passed my driving test on the first try.", "I failed my driving test for the third time."),
+    ("My best friend surprised me with a visit today.", "My best friend stopped talking to me today."),
+    ("We just found out we are having a baby.", "We just found out we lost the baby."),
+    ("My grandmother turned 95 and is in great health.", "My grandmother passed away this morning."),
+    ("I got accepted to my dream university.", "I got rejected from every university I applied to."),
+]
+
+
+def happiness_test(ep):
+    """The 'happy' score at the Assistant token should be higher for the good version of
+    each situation, and should rise as a sister's age at death rises (paper's example)."""
+    if "happy" not in ep.emotions:
+        return
+    i = ep.emotions.index("happy")
+    good = ep.score_assistant_batch([g for g, _ in HAPPY_PAIRS])[:, i]
+    bad = ep.score_assistant_batch([b for _, b in HAPPY_PAIRS])[:, i]
+    print(f"\n[3b] Happiness pairs at the Assistant token (layer {ep.layer}): "
+          f"good > bad in {(good > bad).sum()}/{len(good)}, mean diff {np.mean(good - bad):+.2f}")
+    for (g, _), sg, sb in zip(HAPPY_PAIRS, good, bad):
+        print(f"   {sg:+6.2f} vs {sb:+6.2f}  {g[:60]}")
+    ages = [5, 20, 40, 60, 80, 100]
+    s = ep.score_assistant_batch([f"My sister passed away. She was {a} years old." for a in ages])[:, i]
+    print("   sister's age at death -> happy: " + ", ".join(f"{a}:{x:+.2f}" for a, x in zip(ages, s)))
+
+
 def steering_demo(ep, model, tok):
     from emoprobe.steering import generate, steer
 
@@ -114,6 +143,7 @@ def main():
         model, tok = load_model(a.model)
         ep = EmotionProbe(model, tok, probe, layer=a.layer)
         dose_test(ep)
+        happiness_test(ep)
         if a.steer:
             steering_demo(ep, model, tok)
 

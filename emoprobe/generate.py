@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from tqdm.auto import tqdm
@@ -45,11 +48,24 @@ def build_jobs(kind: str, topics: list[str], emotions: list[str] | None, n_per_c
     return jobs
 
 
-def _rows(job: Job, text: str) -> list[dict]:
+def names_emotion(text: str, emotion: str) -> bool:
+    """True if the story uses the emotion word itself or a simple inflection of it
+    ('happy', 'happily', 'happiness', 'calmly'). Whole words only, so 'sad' does not
+    match 'saddle'. Synonyms (e.g. 'anger' for 'angry') are not caught."""
+    e = re.escape(emotion.lower())
+    alts = [e] + ([e[:-1] + "i"] if emotion.endswith("y") else [])
+    pattern = r"\b(?:" + "|".join(alts) + r")(?:ly|ness|ed|er|est|s)?\b"
+    return re.search(pattern, text.lower()) is not None
+
+
+def _rows(job: Job, text: str, drop_named: bool = True) -> list[dict]:
+    items = parse_items(text)
+    if job.kind == "story" and drop_named:
+        items = [t for t in items if not names_emotion(t, job.emotion)]
     return [
         {"id": f"{job.custom_id}-{k}", "kind": job.kind, "emotion": job.emotion,
          "topic_id": job.topic_id, "topic": job.topic, "text": item}
-        for k, item in enumerate(parse_items(text))
+        for k, item in enumerate(items)
     ]
 
 
@@ -124,6 +140,74 @@ def run_anthropic_batches(jobs: list[Job], out_path: str, model: str = "claude-o
             else:
                 n_bad += 1
         print(f"{bid}: {n_ok} succeeded, {n_bad} failed/refused (re-run failed ids separately if needed)")
+
+
+# ---- OpenAI-compatible APIs (DeepSeek, OpenRouter, Groq, Together, Gemini, ...) --------
+PRESETS = {
+    # name: (base_url, default model, env var holding the key)
+    "deepseek": ("https://api.deepseek.com", "deepseek-chat", "DEEPSEEK_API_KEY"),
+    "openrouter": ("https://openrouter.ai/api/v1", "deepseek/deepseek-chat", "OPENROUTER_API_KEY"),
+    "groq": ("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", "GROQ_API_KEY"),
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.5-flash", "GEMINI_API_KEY"),
+}
+
+
+def _done_job_ids(out_path: str) -> set[str]:
+    """Job ids that already have rows in out_path, so an interrupted run can resume."""
+    if not os.path.exists(out_path):
+        return set()
+    with open(out_path, encoding="utf-8") as f:
+        return {json.loads(line)["id"].rsplit("-", 1)[0] for line in f if line.strip()}
+
+
+def run_openai_compatible(jobs: list[Job], out_path: str, model: str, base_url: str,
+                          api_key_env: str, workers: int = 16, max_tokens: int = 3000,
+                          temperature: float = 1.0, max_retries: int = 5, client=None):
+    """Run jobs concurrently against an OpenAI-compatible chat endpoint.
+
+    Resumable: jobs whose rows are already in out_path are skipped. Jobs that fail
+    after retries are reported and can be picked up by re-running the same command.
+    """
+    if client is None:
+        from openai import OpenAI
+
+        key = os.environ.get(api_key_env)
+        if not key:
+            raise SystemExit(f"Set {api_key_env} to your API key first.")
+        client = OpenAI(api_key=key, base_url=base_url)
+
+    done = _done_job_ids(out_path)
+    todo = [j for j in jobs if j.custom_id not in done]
+    print(f"{len(jobs) - len(todo)} jobs already done, {len(todo)} to run")
+    lock = threading.Lock()
+    stats = {"items": 0, "failed": 0}
+
+    def work(job: Job):
+        for attempt in range(max_retries):
+            try:
+                resp = client.chat.completions.create(
+                    model=model, max_tokens=max_tokens, temperature=temperature,
+                    messages=[{"role": "user", "content": job.prompt}],
+                )
+                return job, resp.choices[0].message.content or ""
+            except Exception as e:  # rate limits, timeouts, 5xx: back off and retry
+                if attempt == max_retries - 1:
+                    print(f"{job.custom_id} failed: {type(e).__name__}: {e}")
+                    return job, None
+                time.sleep(2 ** attempt)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(work, j) for j in todo]
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="generating"):
+            job, text = fut.result()
+            with lock:
+                if text is None:
+                    stats["failed"] += 1
+                    continue
+                rows = _rows(job, text)
+                _append(out_path, rows)
+                stats["items"] += len(rows)
+    print(f"wrote {stats['items']} items; {stats['failed']} jobs failed (re-run to retry them)")
 
 
 # ---- Local Hugging Face model ----------------------------------------------------------

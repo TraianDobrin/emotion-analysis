@@ -5,6 +5,12 @@ Examples
   python scripts/generate_data.py --kind story   --backend anthropic --n-topics 20 --out data/stories.jsonl
   python scripts/generate_data.py --kind neutral --backend anthropic --n-topics 60 --out data/neutral.jsonl
 
+  # Cheap: DeepSeek (OpenAI-compatible API, needs DEEPSEEK_API_KEY); resumable
+  python scripts/generate_data.py --kind story --backend deepseek --emotions core --n-topics 20 --out data/stories.jsonl
+
+  # Any other OpenAI-compatible endpoint (OpenRouter, Groq, Gemini presets, or your own)
+  python scripts/generate_data.py --kind story --backend openrouter --api-model qwen/qwen-2.5-72b-instruct ...
+
   # Tiny local smoke test
   python scripts/generate_data.py --kind story --backend hf --hf-model Qwen/Qwen2.5-0.5B-Instruct \
       --emotions happy,afraid,calm,angry --n-topics 3 --n-per-call 2 --out data/smoke_stories.jsonl
@@ -16,15 +22,23 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from emoprobe.emotions import CORE_EMOTIONS, EMOTIONS, TOPICS  # noqa: E402
-from emoprobe.generate import build_jobs, run_anthropic_batches, run_hf  # noqa: E402
+from emoprobe.emotions import CORE_EMOTIONS, EMOTIONS, HAPPY_MIN, TOPICS  # noqa: E402
+from emoprobe.generate import (  # noqa: E402
+    PRESETS, build_jobs, run_anthropic_batches, run_hf, run_openai_compatible,
+)
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--kind", choices=["story", "neutral"], required=True)
-    p.add_argument("--backend", choices=["anthropic", "hf"], default="anthropic")
-    p.add_argument("--emotions", default="all", help="'all' (171), 'core' (16), or comma-separated list")
+    p.add_argument("--backend", default="anthropic",
+                   choices=["anthropic", "hf", "deepseek", "openrouter", "groq", "gemini", "openai-compatible"])
+    p.add_argument("--api-model", default=None, help="model for OpenAI-compatible backends (default: preset's)")
+    p.add_argument("--base-url", default=None, help="for --backend openai-compatible")
+    p.add_argument("--api-key-env", default=None, help="env var holding the key (default: preset's)")
+    p.add_argument("--workers", type=int, default=16, help="concurrent requests for API backends")
+    p.add_argument("--emotions", default="all",
+                   help="'all' (171), 'core' (16), 'happy-min' (happy + 5 contrasts), or comma-separated list")
     p.add_argument("--topics-file", default=None, help="one topic per line (default: built-in topics)")
     p.add_argument("--n-topics", type=int, default=20)
     p.add_argument("--n-per-call", type=int, default=6, help="stories/dialogues requested per call")
@@ -40,6 +54,8 @@ def main():
         emotions = EMOTIONS
     elif a.emotions == "core":
         emotions = CORE_EMOTIONS
+    elif a.emotions == "happy-min":
+        emotions = HAPPY_MIN
     else:
         emotions = [e.strip() for e in a.emotions.split(",")]
 
@@ -59,6 +75,13 @@ def main():
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     if a.backend == "anthropic":
         run_anthropic_batches(jobs, a.out, model=a.claude_model, effort=a.effort)
+    elif a.backend != "hf":
+        base_url, model, key_env = PRESETS.get(a.backend, (None, None, "OPENAI_API_KEY"))
+        base_url = a.base_url or base_url
+        if base_url is None:
+            sys.exit("--backend openai-compatible needs --base-url")
+        run_openai_compatible(jobs, a.out, model=a.api_model or model, base_url=base_url,
+                              api_key_env=a.api_key_env or key_env, workers=a.workers)
     else:
         if os.path.exists(a.out):
             sys.exit(f"{a.out} exists; delete it or choose another --out (hf backend appends).")

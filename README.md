@@ -33,6 +33,26 @@ pip install --force-reinstall torch --index-url https://download.pytorch.org/whl
 
 To generate stories with Claude you also need an Anthropic API key (`ANTHROPIC_API_KEY`) or `ant auth login`.
 
+## Quick start: happiness only, cheap
+
+The vector is "happy stories minus the mean over emotions", so happiness needs a few contrast emotions. `--emotions happy-min` uses happy, sad, afraid, angry, calm and bored. Story generation can use any OpenAI-compatible API: the `deepseek`, `openrouter`, `groq` and `gemini` presets, or `--backend openai-compatible --base-url ...`. Runs are resumable, and stories that name their own emotion are dropped automatically.
+
+```bash
+set DEEPSEEK_API_KEY=...     # or GROQ_API_KEY / GEMINI_API_KEY with --backend groq / gemini (free tiers)
+python scripts/generate_data.py --kind story   --backend deepseek --emotions happy-min --n-topics 30 --out data/happy_stories.jsonl
+python scripts/generate_data.py --kind neutral --backend deepseek --n-topics 30 --out data/neutral.jsonl
+python scripts/extract_activations.py --model Qwen/Qwen2.5-3B-Instruct --data data/happy_stories.jsonl --out acts/happy --layers every:2
+python scripts/extract_activations.py --model Qwen/Qwen2.5-3B-Instruct --data data/neutral.jsonl --out acts/neutral --layers every:2
+python scripts/build_vectors.py --stories acts/happy --neutral acts/neutral --out probes/happy.pt
+python scripts/validate.py --probe probes/happy.pt --stories acts/happy --neutral acts/neutral --model Qwen/Qwen2.5-3B-Instruct --steer
+```
+
+That is 180 + 30 API calls, giving about 1,000 stories and 180 dialogues. At DeepSeek-class prices it costs cents. Check the provider's current pricing.
+
+`validate.py` reports held-out accuracy, and for happiness two specific tests:
+- **good vs. bad pairs:** the same situation with good or bad news, where "happy" should be higher for the good version
+- **the paper's sister example:** "happy" should rise as the sister's age at death rises
+
 ## Pipeline
 
 ```bash

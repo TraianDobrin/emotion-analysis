@@ -75,6 +75,52 @@ def test_parse_items():
     assert parse_items("### Story 1:\n" + "x" * 50 + "\n\n### Story 2:\n" + "y" * 50) == ["x" * 50, "y" * 50]
 
 
+def test_names_emotion():
+    from emoprobe.generate import names_emotion
+
+    assert names_emotion("She smiled happily.", "happy")
+    assert names_emotion("Pure happiness.", "happy")
+    assert names_emotion("He was AFRAID.", "afraid")
+    assert names_emotion("They felt on edge all day.", "on edge")
+    assert not names_emotion("He sat on the saddle.", "sad")
+    assert not names_emotion("Out of context.", "content")
+    assert not names_emotion("Her hands shook.", "afraid")
+
+
+class _FakeClient:
+    """Mimics openai.OpenAI().chat.completions.create; fails once per job to test retries."""
+
+    def __init__(self):
+        self.seen = set()
+        self.chat = self
+        self.completions = self
+
+    def create(self, model, messages, **kw):
+        prompt = messages[0]["content"]
+        if prompt not in self.seen:
+            self.seen.add(prompt)
+            raise RuntimeError("rate limited")
+        good = "She gripped the railing until her knuckles went white, " * 2
+        bad = "He was so afraid that he could not move from the spot at all."
+        msg = type("M", (), {"content": f"{good}\n###\n{bad}\n###\n{good}"})
+        return type("R", (), {"choices": [type("C", (), {"message": msg})]})
+
+
+def test_openai_compatible_backend_resumes_and_filters(tmp_path, monkeypatch):
+    from emoprobe import generate
+
+    monkeypatch.setattr(generate.time, "sleep", lambda s: None)
+    jobs = generate.build_jobs("story", ["Topic A", "Topic B"], ["afraid"], n_per_call=3)
+    out = str(tmp_path / "s.jsonl")
+    generate.run_openai_compatible(jobs[:1], out, "m", "u", "K", workers=2, client=_FakeClient())
+    generate.run_openai_compatible(jobs, out, "m", "u", "K", workers=2, client=_FakeClient())
+    import json
+
+    rows = [json.loads(line) for line in open(out, encoding="utf-8")]
+    assert len(rows) == 4  # 2 jobs x 2 stories; the story naming 'afraid' is dropped
+    assert {r["topic"] for r in rows} == {"Topic A", "Topic B"}  # job A not redone
+
+
 def test_prompt_and_layers():
     assert '"proud"' in story_prompt("A topic", "proud", 3)
     assert parse_layers("all", 4) == [0, 1, 2, 3]
