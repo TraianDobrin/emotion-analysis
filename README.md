@@ -1,8 +1,15 @@
-# llm-emotion-probes
+# emotion-analysis
 
-Emotion vectors (linear probes) for open-weights LLMs, following Anthropic's
-"Emotion concepts and their function in a large language model" (2026).
-First goal: a "happy" probe whose score can be used as an RL reward.
+Reading emotions out of open-weights LLMs. The shared base is a reproduction of the
+emotion vectors from Anthropic's "Emotion concepts and their function in a large
+language model" (2026), in the `emoprobe` package. Two research directions build on it:
+
+1. **Emotion-shaped RL rewards:** reward = alpha * env reward + (1 - alpha) * emotion
+   probe score of an LLM reading the agent's situation.
+2. **Nonlinear emotion probes:** whether nonlinear probes find emotion information
+   (e.g. a persistent, speaker-specific state) that the paper's linear vectors miss.
+
+Both use the same data, activations and validation tests.
 
 ## How it works
 
