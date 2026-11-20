@@ -1,9 +1,4 @@
-"""Recording residual-stream activations with forward hooks.
-
-We hook the output of each decoder block rather than using output_hidden_states,
-because HF applies the final norm to the last hidden state of some models and
-because hooks let us keep only the layers we need.
-"""
+"""Step 2: record the residual stream with forward hooks on the transformer blocks."""
 
 import numpy as np
 import torch
@@ -13,92 +8,51 @@ from .model import decoder_layers, model_device
 
 
 class ResidualRecorder:
-    """Context manager that stores the residual stream after the given blocks."""
+    """`with ResidualRecorder(model, layers) as rec:` after a forward pass,
+    rec.cache[layer] holds that block's output, shape [batch, tokens, dim]."""
 
     def __init__(self, model, layers):
-        self.layers = list(layers)
-        self.cache: dict[int, torch.Tensor] = {}
-        self._blocks = decoder_layers(model)
-        self._handles = []
-
-    def _hook(self, layer):
-        def fn(_module, _inp, out):
-            self.cache[layer] = out[0] if isinstance(out, tuple) else out
-
-        return fn
+        self.blocks, self.layers, self.cache, self.handles = decoder_layers(model), layers, {}, []
 
     def __enter__(self):
-        for l in self.layers:
-            self._handles.append(self._blocks[l].register_forward_hook(self._hook(l)))
+        for layer in self.layers:
+            def hook(_module, _inp, out, layer=layer):
+                self.cache[layer] = out[0] if isinstance(out, tuple) else out
+            self.handles.append(self.blocks[layer].register_forward_hook(hook))
         return self
 
     def __exit__(self, *exc):
-        for h in self._handles:
+        for h in self.handles:
             h.remove()
-        self._handles.clear()
-        self.cache.clear()
 
 
 @torch.no_grad()
-def mean_activations(
-    model,
-    tok,
-    texts: list[str],
-    layers: list[int],
-    start_token: int = 50,
-    batch_size: int = 8,
-    max_length: int = 512,
-) -> np.ndarray:
-    """Per-text mean residual activation, averaged over token positions >= start_token.
+def activations(model, tok, texts, layers, mode="mean", start_token=50, batch_size=8, max_length=512):
+    """One vector per text and layer: float32 [N, len(layers), D].
 
-    Following the paper, averaging starts at the 50th token, by which point the
-    emotional content should be apparent. Texts shorter than 2*start_token start
-    averaging at half their length instead. Returns float16 [N, len(layers), D].
+    mode="mean": average over tokens from `start_token` on (the paper uses 50, by which
+                 point the story's emotion is clear; short texts start at half their length).
+    mode="last": the last token only (e.g. the token just before the Assistant replies).
     """
     device = model_device(model)
     tok.padding_side = "right"
-    out = None
+    out = np.zeros((len(texts), len(layers), model.config.hidden_size), dtype=np.float32)
     with ResidualRecorder(model, layers) as rec:
-        for i in tqdm(range(0, len(texts), batch_size), desc="activations"):
-            batch = texts[i : i + batch_size]
-            enc = tok(batch, return_tensors="pt", padding=True, truncation=True, max_length=max_length)
-            enc = {k: v.to(device) for k, v in enc.items()}
+        for i in tqdm(range(0, len(texts), batch_size), disable=len(texts) <= batch_size):
+            enc = tok(texts[i:i + batch_size], return_tensors="pt", padding=True, truncation=True,
+                      max_length=max_length, add_special_tokens=(mode == "mean")).to(device)
             model(**enc)
-
             mask = enc["attention_mask"]
             lengths = mask.sum(1)
-            start = torch.clamp(torch.minimum(torch.full_like(lengths, start_token), lengths // 2), min=1)
-            pos = torch.arange(mask.shape[1], device=device)[None, :]
-            sel = (mask.bool() & (pos >= start[:, None])).float()  # [B, T]
-            denom = sel.sum(1, keepdim=True).clamp(min=1)
-
-            for j, l in enumerate(layers):
-                h = rec.cache[l].float()  # [B, T, D]
-                m = (h * sel[..., None]).sum(1) / denom
-                if out is None:
-                    out = np.zeros((len(texts), len(layers), h.shape[-1]), dtype=np.float16)
-                out[i : i + len(batch), j] = m.cpu().numpy().astype(np.float16)
-    return out
-
-
-@torch.no_grad()
-def last_token_activations(model, tok, texts: list[str], layers: list[int], batch_size: int = 8, max_length: int = 2048):
-    """Residual activation at the final token of each text. Float32 [N, len(layers), D]."""
-    device = model_device(model)
-    tok.padding_side = "right"
-    out = None
-    with ResidualRecorder(model, layers) as rec:
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
-            enc = tok(batch, return_tensors="pt", padding=True, truncation=True, max_length=max_length,
-                      add_special_tokens=False)
-            enc = {k: v.to(device) for k, v in enc.items()}
-            model(**enc)
-            last = enc["attention_mask"].sum(1) - 1
-            idx = torch.arange(len(batch), device=device)
-            for j, l in enumerate(layers):
-                h = rec.cache[l][idx, last].float()
-                if out is None:
-                    out = np.zeros((len(texts), len(layers), h.shape[-1]), dtype=np.float32)
-                out[i : i + len(batch), j] = h.cpu().numpy()
+            if mode == "mean":
+                start = (lengths // 2).clamp(min=1, max=start_token)
+                positions = torch.arange(mask.shape[1], device=device)
+                weights = (mask.bool() & (positions[None] >= start[:, None])).float()
+            else:
+                weights = torch.zeros_like(mask, dtype=torch.float)
+                weights[torch.arange(len(lengths)), lengths - 1] = 1.0
+            weights /= weights.sum(1, keepdim=True)
+            for j, layer in enumerate(layers):
+                h = rec.cache[layer].float()  # [B, T, D]
+                out[i:i + len(lengths), j] = torch.einsum("bt,btd->bd", weights, h).cpu().numpy()
     return out

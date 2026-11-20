@@ -1,32 +1,15 @@
-"""Prompts for generating the labelled story set and the neutral dialogue set,
-plus a parser that splits a generation into individual items.
+"""The neutral-dialogue prompt, and a parser that splits one LLM response into items.
 
-The wording is our own, but it follows the same recipe as the paper: one premise,
-one target emotion, several independent one-paragraph stories that never name
-the emotion, mixing first- and third-person narration.
+The story prompt is the paper's own, imported by scripts/import_paper_assets.py.
 """
 
 import re
-
-SEPARATOR = "###"
-
-STORY_PROMPT = """Write {n} separate short stories, each one paragraph long, based on this premise:
-
-Premise: {topic}
-
-Each story should center on a character who is feeling {emotion}.
-
-Rules:
-- Every story is independent: no shared characters or continuity between them.
-- Vary the style and phrasing. Mix first-person and third-person narration.
-- Never use the word "{emotion}" or any close synonym of it. Convey the feeling only through the character's actions, body language, physical sensations, dialogue, thoughts, and the situation itself.
-- Output only the stories, separated by a line containing exactly {sep}. No titles, numbering, or commentary."""
 
 NEUTRAL_PROMPT = """Write {n} separate dialogues loosely inspired by this topic:
 
 Topic: {topic}
 
-Each dialogue is between a human ("Person:") and an AI assistant ("AI:"). The Person asks a question or requests help with a task and the AI helps. Use 1 to 5 exchanges, with each turn on its own line starting with "Person:" or "AI:". Some dialogues may begin with a short line of instructions for the assistant before the first Person turn.
+Each dialogue is between a human ("Person:") and an AI assistant ("AI:"). The Person asks a question or requests help with a task and the AI helps. Use 1 to 5 exchanges, with each turn on its own line starting with "Person:" or "AI:".
 
 Mix dialogue types: programming help, factual questions (science, history, math, geography), work tasks (writing, analysis, summarizing), practical how-to questions, and neutral creative tasks (brainstorming names, making lists).
 
@@ -35,37 +18,20 @@ The dialogues must be completely emotionally neutral:
 - No pleasantries such as "Great question!" or "Happy to help".
 - Matter-of-fact language and pure information exchange only. If the topic is emotionally charged, keep only a neutral, factual angle on it.
 
-Output only the dialogues, separated by a line containing exactly {sep}."""
+Output only the dialogues, separated by a line containing exactly ###."""
 
 
-def story_prompt(topic: str, emotion: str, n: int) -> str:
-    return STORY_PROMPT.format(topic=topic, emotion=emotion, n=n, sep=SEPARATOR)
+def neutral_prompt(topic, n):
+    return NEUTRAL_PROMPT.format(topic=topic, n=n)
 
 
-def neutral_prompt(topic: str, n: int) -> str:
-    return NEUTRAL_PROMPT.format(topic=topic, n=n, sep=SEPARATOR)
+# A line that separates items: '[story 2]', 'Story 2:', '**Dialogue 3**', '###', '### Story 2'.
+_SEPARATOR = re.compile(r"^\s*(?:\**\[?\s*(?:story|dialogue)\s*\d+\s*\]?[:.]?\**|#{2,}.{0,40})\s*$",
+                        re.IGNORECASE | re.MULTILINE)
 
 
-_LEADING_LABEL = re.compile(
-    r"^\s*(#+\s*)?(\**\[?\s*(story|dialogue)\s*\d+\s*\]?[:.)]?\**|\d+[.)])\s*", re.IGNORECASE
-)
-# A separator line: '###' alone, or a short markdown header like '### Story 2:'.
-_SEP_LINE = re.compile(r"^\s*#{2,}[^\n]{0,40}$", re.MULTILINE)
-# A label alone on its line, like '[story 2]', 'Story 2:', '**Dialogue 3**'.
-_LABEL_LINE = re.compile(r"^\s*\**\[?\s*(?:story|dialogue)\s*\d+\s*\]?[:.]?\**\s*$", re.IGNORECASE | re.MULTILINE)
-_SPLIT = re.compile(_LABEL_LINE.pattern + "|" + _SEP_LINE.pattern, re.IGNORECASE | re.MULTILINE)
-
-
-def parse_items(text: str, min_chars: int = 40) -> list[str]:
-    """Split a generation into items on label lines ('[story 2]') and separator/header
-    lines ('###'), or else on blank lines (small local models often ignore the format)."""
-    if _SPLIT.search(text):
-        parts = _SPLIT.split(text)
-    else:
-        parts = re.split(r"\n\s*\n", text)
-    items = []
-    for p in parts:
-        p = _LEADING_LABEL.sub("", p.strip()).strip()
-        if len(p) >= min_chars:
-            items.append(p)
-    return items
+def parse_items(text, min_chars=40):
+    """Split a response on separator lines, or on blank lines if there are none.
+    Fragments shorter than min_chars (stray headers, 'Here are your stories:') are dropped."""
+    parts = _SEPARATOR.split(text) if _SEPARATOR.search(text) else re.split(r"\n\s*\n", text)
+    return [p.strip() for p in parts if len(p.strip()) >= min_chars]

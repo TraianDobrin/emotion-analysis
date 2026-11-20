@@ -10,7 +10,7 @@ dependencies = [
     "numpy",
     "scikit-learn",
     "tqdm",
-    "anthropic",
+    "openai",
 ]
 
 [project.optional-dependencies]
